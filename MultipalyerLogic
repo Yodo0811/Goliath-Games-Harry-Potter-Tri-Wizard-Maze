@@ -1,0 +1,363 @@
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+// player class
+class Player {
+    private int id;
+    private List<Integer> movers;
+
+    public Player(int id) {
+        this.id = id;
+        this.movers = new ArrayList<>();
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    public List<Integer> getMovers() {
+        return movers;
+    }
+
+    public void addMover(int position) {
+        movers.add(position);
+    }
+
+    public void moveMover(int moverIndex, int steps) {
+        int currentPosition = movers.get(moverIndex);
+        movers.set(moverIndex, currentPosition + steps);
+    }
+
+    public boolean canMoveMover(int moverIndex) {
+        // always allow moving(其实我感觉这个没有太大必要)
+        return true;
+    }
+
+    public int getLastMovedMoverIndex() {
+        // 返回最后一个棋子索引
+        return movers.size() - 1;
+    }
+
+    public boolean allMoversInHome() {
+        // 假设所有棋子在位置 0 为到家
+        for (int position : movers) {
+            if (position != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public void notifyYourTurn() {
+        System.out.println("Player " + id + ", it's your turn.");
+    }
+
+    public void notifyGameStart() {
+        System.out.println("Player " + id + ", the game has started.");
+    }
+
+    public void notifyGameOver(boolean isWinner) {
+        if (isWinner) {
+            System.out.println("Player " + id + ", you won the game!");
+        } else {
+            System.out.println("Player " + id + ", the game is over.");
+        }
+    }
+
+    public void notifyMoverSentBack(int moverIndex) {
+        System.out.println("Player " + id + ", mover " + moverIndex + " was sent back to start.");
+    }
+}
+
+// game class
+class Game {
+    private int playerCount;
+    private List<Player> players;
+    private int currentPlayerIndex;
+    private int totalSpaces;
+    private final Lock gameLock = new ReentrantLock();
+    private boolean gameStarted = false;
+    private boolean waitingForCardEffect = false;
+
+    public Player getCurrentPlayer() {
+        return null;
+    }
+
+    public void moveCurrentPlayerMover(int i, int i1) {
+    }
+
+    public enum GameState {
+        WAITING_FOR_PLAYERS,
+        PLAYER_TURN,
+        PROCESSING_CARD,
+        GAME_OVER
+    }
+
+    private GameState gameState = GameState.WAITING_FOR_PLAYERS;
+
+    public Game(int playerCount) {
+        if (playerCount != 2 && playerCount != 4) {
+            throw new IllegalArgumentException("Player count must be 2 or 4");
+        }
+        this.playerCount = playerCount;
+        this.players = new ArrayList<>(playerCount);
+        this.currentPlayerIndex = 0;
+        this.totalSpaces = 7 * playerCount + 4 * playerCount;
+    }
+
+    public synchronized boolean addPlayer(Player player) {
+        if (gameStarted) {
+            System.out.println("Cannot add player: Game already started");
+            return false;
+        }
+
+        if (players.size() >= playerCount) {
+            System.out.println("Cannot add player: Maximum players reached");
+            return false;
+        }
+
+        players.add(player);
+        player.getId();
+
+        if (players.size() == playerCount) {
+            startGame();
+        }
+        return true;
+    }
+
+    private synchronized void startGame() {
+        if (players.size() != playerCount) {
+            System.out.println("Cannot start game: Not enough players");
+            return;
+        }
+
+        gameStarted = true;
+        gameState = GameState.PLAYER_TURN;
+        currentPlayerIndex = 0;
+        for (int i = 0; i < playerCount; i++) {
+            Player player = players.get(i);
+            int moverCount = playerCount == 2 ? 8 : 16;
+            for (int j = 0; j < moverCount; j++) {
+                player.addMover(0);
+            }
+        }
+        notifyAllPlayersGameStarted();
+        notifyCurrentPlayer();
+    }
+
+    public synchronized DiceRollResult handleDiceRoll(Player player) {
+        if (!gameStarted) {
+            return DiceRollResult.error("Game has not started yet");
+        }
+
+        if (gameState != GameState.PLAYER_TURN) {
+            return DiceRollResult.error("Not the right time to roll dice");
+        }
+
+        if (!players.get(currentPlayerIndex).equals(player)) {
+            return DiceRollResult.error("It's not your turn");
+        }
+
+        try {
+            gameLock.lock();
+            int diceValue = rollDice();
+            return DiceRollResult.success(diceValue, "You rolled " + diceValue);
+        } finally {
+            gameLock.unlock();
+        }
+    }
+
+    public synchronized MoveResult handlePlayerMove(Player player, int moverIndex, int steps) {
+        if (!gameStarted) {
+            return MoveResult.error("Game has not started yet");
+        }
+
+        if (gameState != GameState.PLAYER_TURN) {
+            return MoveResult.error("Not the right time to move");
+        }
+
+        if (!players.get(currentPlayerIndex).equals(player)) {
+            return MoveResult.error("It's not your turn");
+        }
+
+        try {
+            gameLock.lock();
+
+            if (!player.canMoveMover(moverIndex)) {
+                return MoveResult.error("This mover cannot move");
+            }
+
+            player.moveMover(moverIndex, steps);
+            int newPosition = player.getMovers().get(moverIndex);
+            MoveResult result = MoveResult.success("Moved successfully", newPosition);
+
+            handleConflicts(player, moverIndex, newPosition);
+
+            if (checkWinCondition(player)) {
+                endGame(player);
+                return MoveResult.gameOver(player.getId() + " won the Triwizard Tournament!");
+            }
+
+            nextPlayer();
+            return result;
+        } finally {
+            gameLock.unlock();
+        }
+    }
+
+    private void handleConflicts(Player movingPlayer, int moverIndex, int newPosition) {
+        for (Player player : players) {
+            if (!player.equals(movingPlayer)) {
+                List<Integer> movers = player.getMovers();
+                for (int i = 0; i < movers.size(); i++) {
+                    if (movers.get(i) == newPosition) {
+                        player.moveMover(i, -movers.get(i));
+                        player.notifyMoverSentBack(i);
+                    }
+                }
+            }
+        }
+    }
+
+    void nextPlayer() {
+        currentPlayerIndex = (currentPlayerIndex + 1) % playerCount;
+        gameState = GameState.PLAYER_TURN;
+        notifyCurrentPlayer();
+    }
+
+    private void notifyCurrentPlayer() {
+        if (currentPlayerIndex >= 0 && currentPlayerIndex < players.size()) {
+            players.get(currentPlayerIndex).notifyYourTurn();
+        }
+    }
+
+    private void notifyAllPlayersGameStarted() {
+        for (Player player : players) {
+            if (player != null) {
+                player.notifyGameStart();
+            }
+        }
+    }
+
+    private boolean checkWinCondition(Player player) {
+        return player != null && player.allMoversInHome();
+    }
+
+    private void endGame(Player winner) {
+        gameState = GameState.GAME_OVER;
+        for (Player player : players) {
+            if (player != null) {
+                player.notifyGameOver(player.equals(winner));
+            }
+        }
+    }
+
+    private int rollDice() {
+        return (int) (Math.random() * 6) + 1;
+    }
+
+    public static class DiceRollResult {
+        private final boolean success;
+        private final String message;
+        private final int value;
+
+        private DiceRollResult(boolean success, String message, int value) {
+            this.success = success;
+            this.message = message;
+            this.value = value;
+        }
+
+        public static DiceRollResult success(int value, String message) {
+            return new DiceRollResult(true, message, value);
+        }
+
+        public static DiceRollResult error(String message) {
+            return new DiceRollResult(false, message, -1);
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public int getValue() {
+            return value;
+        }
+    }
+
+    public static class MoveResult {
+        private final boolean success;
+        private final String message;
+        private final int newPosition;
+        private final boolean requireCardDraw;
+        private final boolean gameOver;
+
+        private MoveResult(boolean success, String message, int newPosition,
+                           boolean requireCardDraw, boolean gameOver) {
+            this.success = success;
+            this.message = message;
+            this.newPosition = newPosition;
+            this.requireCardDraw = requireCardDraw;
+            this.gameOver = gameOver;
+        }
+
+        public static MoveResult success(String message, int newPosition) {
+            return new MoveResult(true, message, newPosition, false, false);
+        }
+
+        public static MoveResult error(String message) {
+            return new MoveResult(false, message, -1, false, false);
+        }
+
+        public static MoveResult requireCardDraw(int newPosition) {
+            return new MoveResult(true, "Please draw a card", newPosition, true, false);
+        }
+
+        public static MoveResult gameOver(String message) {
+            return new MoveResult(true, message, -1, false, true);
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+
+        public String getMessage() {
+            return message;
+        }
+
+        public int getNewPosition() {
+            return newPosition;
+        }
+
+        public boolean isRequireCardDraw() {
+            return requireCardDraw;
+        }
+
+        public boolean isGameOver() {
+            return gameOver;
+        }
+    }
+}
+
+public class MultiplayerLogic {
+    public static void main(String[] args) {
+        // 2 people
+        Game game2Players = new Game(2);
+        System.out.println("game start with two people, current player: " + game2Players.getCurrentPlayer().getId());
+        game2Players.moveCurrentPlayerMover(0, 3);
+        game2Players.nextPlayer();
+        System.out.println("coming to: " + game2Players.getCurrentPlayer().getId());
+
+        // 4 people
+        Game game4Players = new Game(4);
+        System.out.println("game start with four people, current player: " + game4Players.getCurrentPlayer().getId());
+        game4Players.moveCurrentPlayerMover(0, 2);
+        game4Players.nextPlayer();
+        System.out.println("coming to: " + game4Players.getCurrentPlayer().getId());
+    }
+}
